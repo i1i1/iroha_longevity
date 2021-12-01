@@ -6,32 +6,12 @@ from random import randrange
 from abc import ABC, abstractmethod
 from time import sleep
 from iroha2 import Client
-from iroha2.data_model.isi import *
-from iroha2.data_model.domain import *
-from iroha2.data_model.expression import *
+from iroha2.data_model import *
 from iroha2.data_model import asset, account, query, Value, Identifiable, Id
-
-
-def unregister(id) -> Instruction:
-    return Instruction.Unregister(Expression.Raw(Id(id)))
-
-def register(identifiable) -> Instruction:
-    return Instruction.Register(Expression.Raw(Identifiable(identifiable)))
-
-def parse_asset_def_id(id) -> asset.DefinitionId:
-    name, domain_name = id.split('#')
-    return asset.DefinitionId(name=name, domain_name=domain_name)
-
-def asset_mint_u32(q, asset: asset.Id):
-    return Instruction(Mint(
-        object=Expression(Value.U32(q)),
-        destination_id=Expression(Value(Id(asset)),
-    )))
-
-def find_asset_by_id(cl: Client, asset: asset.Id):
-    q = query.asset.FindAssetById(Expression(Value(Id(asset))))
-    out = cl.query(q)
-    return out["Identifiable"]["Asset"]
+from iroha2.data_model.domain import *
+from iroha2.data_model.events import EventFilter, pipeline
+from iroha2.data_model.expression import *
+from iroha2.data_model.isi import *
 
 
 class Scenario(ABC):
@@ -46,12 +26,16 @@ class Scenario(ABC):
     def _check(self):
         try:
             return self.check()
-        except:
+        except Exception as e:
+            print(f"Discovered exception during check: {e}")
             return False
 
     def wait(self):
+        i = 0
         while not self._check():
-            sleep(0.1)
+            print(f"chk {i}")
+            i += 1
+            sleep(10)
 
     def run(self):
         step = 1
@@ -66,7 +50,7 @@ class Scenario(ABC):
 class SingleAssetScenario(Scenario):
     def __init__(self, cfg, asset_name):
         self.cl = Client(cfg)
-        self.asset_def_id = parse_asset_def_id('single_asset_scenario#wonderland')
+        self.asset_def_id = asset.DefinitionId.parse(asset_name)
         self.asset = asset.Id(
             definition_id=self.asset_def_id,
             account_id=self.cl.account,
@@ -74,28 +58,38 @@ class SingleAssetScenario(Scenario):
         self.q = 0
 
         try:
-            self.cl.submit_isi_blocking(unregister(self.asset_def_id))
+            inst = Unregister.id(self.asset_def_id)
+            print(inst.to_rust())
+            self.cl.submit_isi_blocking(Unregister.id(self.asset_def_id))
         except:
             pass
 
-        isi = register(asset.Definition(
-            value_type=asset.ValueType.Quantity(),
-            id=self.asset_def_id,
-        ))
-        self.cl.submit_isi_blocking(isi)
+        inst = Register.identifiable(
+            asset.Definition(
+                value_type=asset.ValueType.Quantity(),
+                id=self.asset_def_id,
+                metadata={},
+                mintable=True,
+            ))
+        print(inst.to_rust())
+        self.cl.submit_isi_blocking(inst)
 
     def check(self):
-        asset = find_asset_by_id(self.cl, self.asset)
-        print(asset["value"]["Quantity"], self.q, asset["value"]["Quantity"] == self.q)
+        asset = self.cl.query(query.FindAssetById.id(self.asset))
+        print(f"asset - {asset}")
         return asset["value"]["Quantity"] == self.q
 
     def step(self):
         for i in range(randrange(1, 20)):
             q = randrange(1, 5)
-            print(f"Mint {q}")
             self.q += q
-            self.cl.submit_isi(asset_mint_u32(q, self.asset))
-            sleep(0.1)
+            mint = Mint(
+                object=Expression(Value(q)),
+                destination_id=Expression(Value(Id(self.asset))),
+            )
+            self.cl.submit_isi(mint)
+            sleep(0.01)
+        print(f"Mint {self.q}")
 
 
 if __name__ == "__main__":
